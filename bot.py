@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -69,7 +70,14 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
 SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
 SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
 
-POLL_INTERVAL_SECONDS = 3          # app polls the same queue; stay frequent
+POLL_INTERVAL_SECONDS = 10         # Telegram rejects concurrent getUpdates
+# calls with 409, and the app polls the same queue when the user taps
+# "Check for Returned Files". A short interval meant the bot's request was
+# often in flight at that exact moment, so the app's check failed with
+# 409. 10s + jitter keeps the collision window tiny; a few seconds of
+# extra latency per link is irrelevant for a download bot.
+POLL_JITTER_SECONDS = 2            # random extra sleep per cycle, so the
+# bot's polls never fall into a fixed rhythm the app's taps can align with
 SEEN_FILE = Path(__file__).resolve().parent / "seen_updates.json"
 MAX_SEEN_IDS = 2000                # cap the persisted dedup list
 MAX_FILE_BYTES = 20 * 1024 * 1024  # Bot API getFile cap: app can't fetch bigger
@@ -679,7 +687,7 @@ def main() -> int:
                     handle_message(api, message, channel)
                 except Exception as exc:  # one bad message must not kill the bot
                     log(f"handler error for update {update_id}: {exc}")
-        time.sleep(POLL_INTERVAL_SECONDS)
+        time.sleep(POLL_INTERVAL_SECONDS + random.uniform(0, POLL_JITTER_SECONDS))
     return 0
 
 
