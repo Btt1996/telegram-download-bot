@@ -43,6 +43,7 @@ while the bot is down must be re-sent.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -269,8 +270,55 @@ class TelegramApi:
 # --------------------------------------------------------------------------
 
 
+_COOKIEFILE_CACHE = {"resolved": False, "path": None}
+
+
+def resolve_youtube_cookiefile() -> Path | None:
+    """Locate the YouTube cookies file for yt-dlp, if one is configured.
+
+    Two ways to provide it (first wins):
+    1. YOUTUBE_COOKIES_B64 env var — base64 of a Netscape cookies.txt
+       exported from a logged-in browser. Needed on Render, where env
+       vars must be single-line and there is no persistent disk. The
+       decoded file is written to the temp dir and reused.
+    2. A cookies.txt file sitting next to bot.py (handy for local/PC runs).
+    Returns None when neither is present. Never logs cookie contents.
+    """
+    if _COOKIEFILE_CACHE["resolved"]:
+        return _COOKIEFILE_CACHE["path"]
+    _COOKIEFILE_CACHE["resolved"] = True
+    b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except Exception as exc:
+            log(f"YOUTUBE_COOKIES_B64 is not valid base64: {exc}")
+            return None
+        path = Path(tempfile.gettempdir()) / "btmu-youtube-cookies.txt"
+        path.write_bytes(data)
+        _COOKIEFILE_CACHE["path"] = path
+        return path
+    local = Path(__file__).resolve().parent / "cookies.txt"
+    if local.is_file():
+        _COOKIEFILE_CACHE["path"] = local
+        return local
+    return None
+
+
+def youtube_failure_message(exc: Exception) -> str:
+    """Turn a YouTube download error into a reply the user can act on."""
+    text = str(exc)
+    if "Sign in to confirm you" in text or "not a bot" in text:
+        return (
+            "YouTube refused that video — it wants a signed-in browser "
+            "session (its bot check). The bot needs your YouTube cookies "
+            "to download it. Ask Muse for the 2-minute cookie setup."
+        )
+    return f"Sorry, that YouTube link failed: {exc}"
+
+
 def _ydl_opts(tmpdir: Path) -> dict:
-    return {
+    opts = {
         "format": "bestaudio/best",
         "postprocessors": [
             {
@@ -283,7 +331,20 @@ def _ydl_opts(tmpdir: Path) -> dict:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": False,
+        # YouTube bot-checks the default "web" player client on datacenter
+        # IPs (Render's included): "Sign in to confirm you're not a bot".
+        # Verified 2026-11-23 on the failing video (Lady Gaga G.U.Y.):
+        # web, android, tv_embedded, web_safari and web_music are all
+        # bot-checked; ios and mweb extract but offer no audio format.
+        # android_music is the one client that returns a usable audio
+        # format for music videos, so it goes first; the others stay as
+        # fallbacks. yt-dlp tries each in order.
+        "extractor_args": {"youtube": {"player_client": ["android_music", "android", "ios", "web"]}},
     }
+    cookiefile = resolve_youtube_cookiefile()
+    if cookiefile is not None:
+        opts["cookiefile"] = str(cookiefile)
+    return opts
 
 
 def download_video_as_mp3(video_url: str, tmpdir: Path) -> dict | None:
@@ -443,9 +504,7 @@ def handle_youtube(
             files = download_audio_files(url, tmpdir)
         except Exception as exc:
             log(f"YouTube download failed: {exc}")
-            api.send_text(
-                user_chat_id, f"Sorry, that YouTube link failed: {exc}"
-            )
+            api.send_text(user_chat_id, youtube_failure_message(exc))
             return
         if not files:
             api.send_text(
@@ -652,6 +711,12 @@ def main() -> int:
     start_health_server()  # up before anything else, so Render's
     # health check passes as soon as the process starts
     token, channel = load_config()
+    cookiefile = resolve_youtube_cookiefile()
+    log(
+        "YouTube cookies: configured"
+        if cookiefile is not None
+        else "YouTube cookies: not configured (some videos may ask for sign-in)"
+    )
     api = TelegramApi(token)
     try:
         me = requests.get(f"{api.base}/getMe", timeout=15).json()

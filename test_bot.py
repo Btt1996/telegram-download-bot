@@ -4,7 +4,9 @@ No credentials, no network calls. Run from this folder with:
     python -m unittest test_bot -v
 """
 
+import base64
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -20,10 +22,13 @@ from bot import (
     CANT_REPLY,
     START_TEXT,
     SeenStore,
+    _ydl_opts,
     classify_link,
     extract_url,
     fast_forward_seen,
+    resolve_youtube_cookiefile,
     start_health_server,
+    youtube_failure_message,
 )
 
 
@@ -208,6 +213,81 @@ class TestHealthEndpoint(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+
+class TestYoutubeCookies(unittest.TestCase):
+    def setUp(self):
+        self._old_env = os.environ.pop("YOUTUBE_COOKIES_B64", None)
+        self._reset_cache()
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("YOUTUBE_COOKIES_B64", None)
+        else:
+            os.environ["YOUTUBE_COOKIES_B64"] = self._old_env
+        self._reset_cache()
+
+    @staticmethod
+    def _reset_cache():
+        bot._COOKIEFILE_CACHE["resolved"] = False
+        bot._COOKIEFILE_CACHE["path"] = None
+
+    def test_b64_env_var_decodes_to_file(self):
+        content = "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tSID\txyz\n"
+        os.environ["YOUTUBE_COOKIES_B64"] = base64.b64encode(
+            content.encode()
+        ).decode()
+        path = resolve_youtube_cookiefile()
+        self.assertIsNotNone(path)
+        self.assertEqual(Path(path).read_text(), content)
+        # Memoized: a second call returns the same path.
+        self.assertEqual(resolve_youtube_cookiefile(), path)
+
+    def test_invalid_b64_returns_none(self):
+        os.environ["YOUTUBE_COOKIES_B64"] = "!!!not-base64!!!"
+        self.assertIsNone(resolve_youtube_cookiefile())
+
+    def test_no_config_returns_none(self):
+        # No env var and no cookies.txt next to bot.py.
+        self.assertIsNone(resolve_youtube_cookiefile())
+
+    def test_ydl_opts_includes_cookiefile_when_configured(self):
+        content = "# Netscape HTTP Cookie File\n"
+        os.environ["YOUTUBE_COOKIES_B64"] = base64.b64encode(
+            content.encode()
+        ).decode()
+        with tempfile.TemporaryDirectory() as tmp:
+            opts = _ydl_opts(Path(tmp))
+        self.assertIn("cookiefile", opts)
+        self.assertEqual(Path(opts["cookiefile"]).read_text(), content)
+
+    def test_ydl_opts_omits_cookiefile_when_not_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            opts = _ydl_opts(Path(tmp))
+        self.assertNotIn("cookiefile", opts)
+
+    def test_player_clients_start_with_android_music(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            opts = _ydl_opts(Path(tmp))
+        clients = opts["extractor_args"]["youtube"]["player_client"]
+        self.assertEqual(clients[0], "android_music")
+        self.assertIn("web", clients)
+
+
+class TestYoutubeFailureMessage(unittest.TestCase):
+    def test_bot_check_points_at_cookies(self):
+        msg = youtube_failure_message(
+            Exception(
+                "ERROR: [youtube] abc: Sign in to confirm you're not a bot."
+            )
+        )
+        self.assertIn("cookies", msg)
+        self.assertNotIn("Sign in to confirm", msg)
+
+    def test_other_errors_pass_through(self):
+        msg = youtube_failure_message(Exception("some network error"))
+        self.assertTrue(msg.startswith("Sorry, that YouTube link failed:"))
+        self.assertIn("some network error", msg)
 
 
 class TestReplyTexts(unittest.TestCase):

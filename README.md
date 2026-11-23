@@ -77,12 +77,15 @@ re-sent** once the bot is back up.
 
 ## Important details
 
-- **Polling, not webhook.** The bot polls `getUpdates` every 3 seconds
-  with **no offset** and remembers processed `update_id`s in
-  `seen_updates.json`. This is deliberate: the app polls the same bot's
-  `getUpdates`, so a webhook (which empties `getUpdates`) or polling with
-  an offset (which consumes updates) would hide the returned files from
-  the app. Do not "fix" this by adding a webhook or an offset.
+- **Polling, not webhook.** The bot polls `getUpdates` every 10 seconds
+  (plus up to 2 seconds of random jitter) with **no offset** and
+  remembers processed `update_id`s in `seen_updates.json`. This is
+  deliberate: the app polls the same bot's `getUpdates`, so a webhook
+  (which empties `getUpdates`) or polling with an offset (which consumes
+  updates) would hide the returned files from the app. The 10-second
+  interval also keeps the bot's requests from colliding with the app's
+  (Telegram rejects concurrent `getUpdates` with 409). Do not "fix"
+  this by adding a webhook or an offset.
 - **The audio goes to the channel, never as a reply in the private
   chat.** A bot's own outgoing messages never appear in its `getUpdates`,
   so the app would never see a direct reply — only a channel post
@@ -90,10 +93,40 @@ re-sent** once the bot is back up.
 - **20 MB per-file cap.** The Telegram Bot API only lets the app fetch
   files up to 20 MB back (`getFile`), so files over 20 MB are skipped
   and the bot tells you in the chat. Most songs are well under this.
-- **YouTube may block server IPs (403).** If downloads start failing
-  with 403, the usual fixes are a proxy or a YouTube cookies file —
-  see yt-dlp's documentation. The `yt-dlp` package can be upgraded with
-  `pip install -U yt-dlp` if YouTube changes break downloads.
+- **YouTube may block server IPs ("Sign in to confirm you're not a
+  bot").** YouTube bot-checks datacenter IPs, so downloads from Render
+  can fail even though the same link works in a browser. The bot first
+  tries the `android_music` player client, then `android`, `ios`, and
+  `web` — that fixes many videos, but not all. The reliable fix is a
+  YouTube cookies file (see "YouTube cookies" below). The `yt-dlp`
+  package can be upgraded with `pip install -U yt-dlp` if YouTube
+  changes break downloads.
+
+## YouTube cookies (when YouTube asks for sign-in)
+
+When a link fails with "Sign in to confirm you're not a bot", the bot
+needs your YouTube session cookies. They are **not** stored in the repo
+— they travel as an environment variable, and only you can create them.
+
+1. In Chrome or Edge, install the **"Get cookies.txt LOCALLY"**
+   extension, then open https://www.youtube.com while logged in.
+2. Click the extension and export the cookies for youtube.com. Save the
+   file as `cookies.txt`.
+3. Turn it into one line of base64 (Render env vars must be single-line).
+   On Windows PowerShell, in the folder with the file:
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt"))
+   ```
+   Copy the long string it prints.
+4. In Render, open the service → Environment → Add variable:
+   key `YOUTUBE_COOKIES_B64`, value the string from step 3 → "Save,
+   rebuild, and deploy".
+5. Send the link to the bot again.
+
+For a local/PC run, just put `cookies.txt` next to `bot.py` instead —
+the bot picks it up automatically. Notes: cookies expire (refresh them
+every few weeks), and they carry your YouTube login session, so keep
+them private — never paste them into chat or commit them.
 - **`/start`** replies with a one-line usage note. Other non-link text is
   ignored.
 - Temp files are deleted after each link is handled.
