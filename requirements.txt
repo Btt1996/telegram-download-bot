@@ -1,0 +1,3 @@
+requests==2.34.2
+yt-dlp==2026.10.26
+spotipy==2.26.0

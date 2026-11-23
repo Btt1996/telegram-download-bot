@@ -1,0 +1,21 @@
+# Render Blueprint for the Btmus Telegram download bot.
+# Deploy: push this folder to a repo, then in the Render dashboard
+# "New +" -> "Blueprint" and point it at the repo. Render asks for the
+# sync: false values at deploy time; they never land in the repo.
+services:
+  - type: web
+    name: telegram-download-bot
+    runtime: python
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        value: "-1004415561764"
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
