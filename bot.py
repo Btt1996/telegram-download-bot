@@ -251,6 +251,7 @@ class TelegramApi:
     def send_audio(
         self, chat_id: int | str, path: Path, title: str, performer: str
     ) -> None:
+        mime = _AUDIO_MIME_BY_SUFFIX.get(path.suffix.lower(), "audio/mpeg")
         with open(path, "rb") as audio_file:
             resp = requests.post(
                 f"{self.base}/sendAudio",
@@ -259,10 +260,23 @@ class TelegramApi:
                     "title": title,
                     "performer": performer,
                 },
-                files={"audio": (path.name, audio_file, "audio/mpeg")},
+                files={"audio": (path.name, audio_file, mime)},
                 timeout=180,
             )
         self._check(resp.json(), "sendAudio")
+
+
+# The bot posts MP3s from yt-dlp, but the pytubefix fallback (see
+# youtube_alt.py) can also post .m4a (AAC, iOS-native) or the original
+# container when ffmpeg is missing. Telegram and the app accept any
+# audio/* mime, so the content type follows the file's suffix.
+_AUDIO_MIME_BY_SUFFIX = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".webm": "audio/webm",
+}
 
 
 # --------------------------------------------------------------------------
@@ -347,10 +361,31 @@ def _ydl_opts(tmpdir: Path) -> dict:
     return opts
 
 
+def _try_alt_download(video_url: str, tmpdir: Path) -> dict | None:
+    """Fall back to the pytubefix downloader when yt-dlp fails.
+
+    youtube_alt.py is a separate script (different package); it is
+    imported lazily so the bot still runs when it is absent.
+    """
+    try:
+        import youtube_alt
+    except ImportError as exc:
+        log(f"alt downloader unavailable: {exc}")
+        return None
+    try:
+        return youtube_alt.download_video_audio(video_url, tmpdir)
+    except Exception as exc:
+        log(f"alt download failed for {video_url}: {exc}")
+        return None
+
+
 def download_video_as_mp3(video_url: str, tmpdir: Path) -> dict | None:
     """Download one YouTube video's audio as an MP3.
 
     Returns {"path", "title", "performer"} or None on failure.
+    When yt-dlp fails (YouTube's bot-check), the pytubefix fallback is
+    tried — it may return an .m4a instead of an .mp3, which the app
+    also plays.
     """
     tmpdir = Path(tmpdir)
     before = set(tmpdir.glob("*.mp3"))
@@ -358,7 +393,7 @@ def download_video_as_mp3(video_url: str, tmpdir: Path) -> dict | None:
         with YoutubeDL(_ydl_opts(tmpdir)) as ydl:
             info = ydl.extract_info(video_url, download=False)
             if not info:
-                return None
+                return _try_alt_download(video_url, tmpdir)
             title = info.get("title") or "Unknown title"
             performer = (
                 info.get("uploader") or info.get("artist") or "Unknown artist"
@@ -366,11 +401,11 @@ def download_video_as_mp3(video_url: str, tmpdir: Path) -> dict | None:
             ydl.download([video_url])
     except Exception as exc:  # yt-dlp raises DownloadError and friends
         log(f"download failed for {video_url}: {exc}")
-        return None
+        return _try_alt_download(video_url, tmpdir)
     new_files = set(tmpdir.glob("*.mp3")) - before
     if not new_files:
         log(f"no MP3 produced for {video_url}")
-        return None
+        return _try_alt_download(video_url, tmpdir)
     path = max(new_files, key=lambda p: p.stat().st_mtime)
     return {"path": path, "title": title, "performer": performer}
 
@@ -379,10 +414,21 @@ def download_audio_files(url: str, tmpdir: Path) -> list[dict]:
     """Download audio from a YouTube URL (video or playlist) as MP3s.
 
     A playlist URL yields at most MAX_YT_ENTRIES tracks, in order.
+    When yt-dlp cannot even list the URL (bot-check on the playlist
+    page), the pytubefix fallback lists and downloads it instead.
     """
     tmpdir = Path(tmpdir)
-    with YoutubeDL(_ydl_opts(tmpdir)) as ydl:
-        info = ydl.extract_info(url, download=False)
+    try:
+        with YoutubeDL(_ydl_opts(tmpdir)) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        log(f"YouTube list failed for {url}: {exc}; trying alt downloader")
+        try:
+            import youtube_alt
+        except ImportError as exc:
+            log(f"alt downloader unavailable: {exc}")
+            return []
+        return youtube_alt.download_audio_files(url, tmpdir)
     if not info:
         return []
     entries = info.get("entries")
@@ -716,6 +762,11 @@ def main() -> int:
         "YouTube cookies: configured"
         if cookiefile is not None
         else "YouTube cookies: not configured (some videos may ask for sign-in)"
+    )
+    log(
+        "ffmpeg: available"
+        if shutil.which("ffmpeg")
+        else "ffmpeg: NOT found (opus fallback will post the original file)"
     )
     api = TelegramApi(token)
     try:

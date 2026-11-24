@@ -127,6 +127,28 @@ For a local/PC run, just put `cookies.txt` next to `bot.py` instead —
 the bot picks it up automatically. Notes: cookies expire (refresh them
 every few weeks), and they carry your YouTube login session, so keep
 them private — never paste them into chat or commit them.
+
+## Alternative downloader — youtube_alt.py (pytubefix)
+
+`youtube_alt.py` is a second, standalone YouTube downloader built on
+**pytubefix** instead of yt-dlp. It exists because YouTube's bot-check
+("Sign in to confirm you're not a bot") blocks yt-dlp on datacenter
+IPs for some videos, and pytubefix — different package, different
+request pattern, different clients — got through for the exact video
+yt-dlp consistently fails on (Lady Gaga G.U.Y., verified 2026-11-23).
+
+- The bot falls back to it automatically: when yt-dlp fails on a video
+  (or can't even list a playlist), the pytubefix path is tried before
+  the bot reports a failure. No app changes needed.
+- It prefers an AAC stream (`.m4a`, iOS-native, no conversion). Otherwise
+  it takes the best audio and converts it to MP3 with ffmpeg when
+  ffmpeg is installed; without ffmpeg it posts the original file.
+- YouTube's check is intermittent, so it retries across clients
+  (ANDROID, IOS, TV, WEB) before giving up. It is not a guarantee —
+  the cookies above remain the reliable fix — but it is a real second
+  chance that needs nothing from you.
+- Standalone use: `python youtube_alt.py <youtube-url> [outdir]`
+- Tests: `python -m unittest test_youtube_alt -v` (14 tests, no network).
 - **`/start`** replies with a one-line usage note. Other non-link text is
   ignored.
 - Temp files are deleted after each link is handled.

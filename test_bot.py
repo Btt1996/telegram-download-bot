@@ -14,6 +14,7 @@ import unittest
 import urllib.request
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -288,6 +289,81 @@ class TestYoutubeFailureMessage(unittest.TestCase):
         msg = youtube_failure_message(Exception("some network error"))
         self.assertTrue(msg.startswith("Sorry, that YouTube link failed:"))
         self.assertIn("some network error", msg)
+
+
+class TestAltFallback(unittest.TestCase):
+    def test_yt_dlp_failure_falls_back_to_alt(self):
+        class FailingYDL:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def extract_info(self, *a, **k):
+                raise Exception("Sign in to confirm you're not a bot")
+
+        fake_alt = mock.Mock()
+        fake_alt.download_video_audio.return_value = {
+            "path": Path("/tmp/x.m4a"),
+            "title": "Song",
+            "performer": "Artist",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("bot.YoutubeDL", FailingYDL):
+                with mock.patch.dict(sys.modules, {"youtube_alt": fake_alt}):
+                    from bot import download_video_as_mp3
+
+                    result = download_video_as_mp3(
+                        "https://www.youtube.com/watch?v=abc123", Path(tmp)
+                    )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["path"].suffix, ".m4a")
+        fake_alt.download_video_audio.assert_called_once()
+
+    def test_no_mp3_produced_falls_back_to_alt(self):
+        class EmptyYDL:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def extract_info(self, *a, **k):
+                return {"title": "Song", "uploader": "Artist"}
+
+            def download(self, urls):
+                pass  # produces no file
+
+        fake_alt = mock.Mock()
+        fake_alt.download_video_audio.return_value = {
+            "path": Path("/tmp/x.m4a"),
+            "title": "Song",
+            "performer": "Artist",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("bot.YoutubeDL", EmptyYDL):
+                with mock.patch.dict(sys.modules, {"youtube_alt": fake_alt}):
+                    from bot import download_video_as_mp3
+
+                    result = download_video_as_mp3(
+                        "https://www.youtube.com/watch?v=abc123", Path(tmp)
+                    )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["path"].suffix, ".m4a")
+
+    def test_audio_mime_follows_suffix(self):
+        from bot import _AUDIO_MIME_BY_SUFFIX
+
+        self.assertEqual(_AUDIO_MIME_BY_SUFFIX[".mp3"], "audio/mpeg")
+        self.assertEqual(_AUDIO_MIME_BY_SUFFIX[".m4a"], "audio/mp4")
+        self.assertEqual(_AUDIO_MIME_BY_SUFFIX[".webm"], "audio/webm")
 
 
 class TestReplyTexts(unittest.TestCase):
