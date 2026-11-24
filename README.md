@@ -17,8 +17,8 @@ posts the MP3 to a channel, and the app picks it up from there.
 
 | Link | What the bot does |
 |---|---|
-| YouTube (`youtube.com`, `youtu.be`) | Downloads the video's audio with yt-dlp, converts to MP3 with ffmpeg, posts it to the channel. Download logic follows [ALGOANHAF/MP3](https://github.com/ALGOANHAF/MP3). A YouTube playlist link posts at most 20 tracks. |
-| Spotify playlist / track (`open.spotify.com`) | Reads the track list with the Spotify API, then finds each track's audio on YouTube and downloads it — Spotify itself gives no audio. Approach follows [Masterolic/Spotify-Downloader](https://github.com/Masterolic/Spotify-Downloader). At most 50 tracks per playlist. Needs Spotify credentials (below); without them the bot replies that Spotify isn't set up yet. |
+| YouTube (`youtube.com`, `youtu.be`) | Replies *"Your YouTube is on the way"* immediately, then downloads the video's audio with yt-dlp, converts to MP3 with ffmpeg, posts it to the channel. Download logic follows [ALGOANHAF/MP3](https://github.com/ALGOANHAF/MP3). A YouTube playlist link posts at most 20 tracks. |
+| Spotify playlist / track (`open.spotify.com`) | Replies *"Your Spotify is on the way"* immediately, then reads the track list from Spotify's public embed page — no Spotify credentials needed (the list is public data) — then finds each track's audio on YouTube and downloads it; Spotify itself gives no audio. Approach follows [Masterolic/Spotify-Downloader](https://github.com/Masterolic/Spotify-Downloader). At most 50 tracks per playlist. Private playlists can't be read from the embed page; for those, add the Spotify credentials (below) and the bot falls back to the Spotify API. |
 | Anything else | Replies in the private chat: *"Sorry, I can't do this link — I only handle YouTube links and Spotify playlists."* Nothing appears in the app. |
 
 ## Run it (Windows)
@@ -35,8 +35,9 @@ posts the MP3 to a channel, and the app picks it up from there.
      Use a **different bot** from the one the app uses for Telegram sync.
    - `CHANNEL_ID` — your channel, e.g. `@yourchannel` or `-1001234567890`.
      Create a channel, add the bot as admin, allow it to post messages.
-   - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — only if you want
-     Spotify links. Free from
+   - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` — OPTIONAL, only as a
+     fallback for private Spotify playlists the public embed page can't
+     read. Free from
      [developer.spotify.com](https://developer.spotify.com) (create an
      app, copy its Client ID and Client Secret). Leave empty to disable.
 4. Run it:
@@ -56,8 +57,8 @@ The bot can run on Render's free tier instead of a PC that stays on.
    repo. Render reads `render.yaml` and creates a free web service
    named `telegram-download-bot` (Frankfurt region).
 3. When Render asks for the secret values, fill them in the dashboard:
-   `BOT_TOKEN` and, if you want Spotify links, `SPOTIFY_CLIENT_ID` /
-   `SPOTIFY_CLIENT_SECRET`. They are marked `sync: false` in
+   `BOT_TOKEN` and, optionally, `SPOTIFY_CLIENT_ID` /
+   `SPOTIFY_CLIENT_SECRET` (private playlists only). They are marked `sync: false` in
    `render.yaml`, so they are never stored in the repo. `CHANNEL_ID`
    is already set in the file (`-1004415561764`).
 4. Render's free service sleeps after 15 minutes with no inbound

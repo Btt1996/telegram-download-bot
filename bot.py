@@ -22,13 +22,17 @@ This bot MUST fit that contract:
 Link handling (Ahmed's spec):
   1. YouTube link -> yt-dlp audio download, ffmpeg -> MP3, post to channel.
      (Download logic of ALGOANHAF/MP3; NOT its polling loop.)
-  2. Spotify playlist/track link -> Spotify API for the track list, then
-     YouTube audio per track (Masterolic/Spotify-Downloader approach;
-     NOT its Pyrogram transport/polling). Needs Spotify credentials.
+  2. Spotify playlist/track link -> track list read from Spotify's public
+     embed page (no Spotify credentials, no API, no login — the list is
+     public data), then YouTube audio per track (Masterolic/
+     Spotify-Downloader approach; NOT its Pyrogram transport/polling).
+     The Spotify API (needs credentials) is only a fallback for private
+     links the embed page can't read.
   3. Anything else -> reply "Sorry, I can't do this link ...".
 
 Config comes ONLY from environment variables (see .env.example):
   BOT_TOKEN, CHANNEL_ID, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET.
+Spotify credentials are OPTIONAL (private playlists only).
 No secrets are hardcoded anywhere in this file.
 
 Run:  python bot.py     (after `pip install -r requirements.txt`)
@@ -44,6 +48,7 @@ while the bot is down must be re-sent.
 from __future__ import annotations
 
 import base64
+import html as html_module
 import json
 import logging
 import os
@@ -100,10 +105,13 @@ START_TEXT = (
     "Send me a YouTube link or a Spotify playlist link and I'll post "
     "the MP3s to the channel for Btmus."
 )
-SPOTIFY_NOT_CONFIGURED = (
-    "Spotify isn't set up on this bot yet — add the Spotify credentials "
-    "and try again."
+SPOTIFY_UNREADABLE = (
+    "I couldn't read that Spotify link — it may be a private playlist. "
+    "Make it public and try again, or add the Spotify credentials "
+    "to the bot and retry."
 )
+YOUTUBE_ON_THE_WAY = "Your YouTube is on the way"
+SPOTIFY_ON_THE_WAY = "Your Spotify is on the way"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -484,6 +492,85 @@ def _track_info(track: dict) -> dict:
     return {"name": track.get("name") or "Unknown", "artists": artists}
 
 
+def _extract_json_array(text: str, marker: str) -> str | None:
+    """Balanced JSON array starting right after `marker`, or None."""
+    i = text.find(marker)
+    if i < 0:
+        return None
+    start = text.find("[", i)
+    if start < 0:
+        return None
+    depth = 0
+    for j, ch in enumerate(text[start:], start):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : j + 1]
+    return None
+
+
+def parse_spotify_embed_tracks(html: str) -> list[dict]:
+    """Track list from a Spotify embed page (no credentials needed).
+
+    Playlists/albums embed a "trackList" JSON array (title + subtitle =
+    artists). A single track embeds its title/artists in the <title> tag
+    ("Song - Artists | Spotify"). Returns [] when nothing parses.
+    """
+    arr = _extract_json_array(html, '"trackList":')
+    if arr is not None:
+        try:
+            entries = json.loads(arr)
+        except Exception:
+            entries = []
+        tracks = []
+        for entry in entries:
+            name = (entry.get("title") or "").strip()
+            if not name:
+                continue
+            tracks.append(
+                {"name": name, "artists": (entry.get("subtitle") or "").strip()}
+            )
+        return tracks
+    m = re.search(r"<title[^>]*>(.*?)</title>", html, re.S)
+    if m:
+        title = html_module.unescape(m.group(1)).strip()
+        if title.endswith(" | Spotify"):
+            title = title[: -len(" | Spotify")].strip()
+        if " - " in title:
+            name, artists = title.rsplit(" - ", 1)
+            return [{"name": name.strip(), "artists": artists.strip()}]
+        if title:
+            return [{"name": title, "artists": ""}]
+    return []
+
+
+def fetch_spotify_tracks_embed(kind: str, item_id: str) -> list[dict] | None:
+    """Track list for a public Spotify playlist/album/track via its embed
+    page — no Spotify credentials, no API, no login. Returns None on any
+    fetch/parse failure (private link, blocked page, changed markup)."""
+    url = f"https://open.spotify.com/embed/{kind}/{item_id}"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0 Safari/537.36"
+                )
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        log(f"Spotify embed fetch failed: {exc}")
+        return None
+    tracks = parse_spotify_embed_tracks(resp.text)
+    return tracks if tracks else None
+
+
 def fetch_spotify_tracks(
     sp: spotipy.Spotify, kind: str, item_id: str
 ) -> list[dict]:
@@ -576,19 +663,24 @@ def handle_spotify(
     channel_id: str,
 ) -> None:
     kind, item_id = detail
-    sp = spotify_client()
-    if sp is None:
-        api.send_text(user_chat_id, SPOTIFY_NOT_CONFIGURED)
-        return
     log(f"Spotify {kind}: {item_id}")
-    try:
-        tracks = fetch_spotify_tracks(sp, kind, item_id)
-    except Exception as exc:
-        log(f"Spotify fetch failed: {exc}")
-        api.send_text(
-            user_chat_id, f"Sorry, I couldn't read that Spotify {kind}: {exc}"
-        )
-        return
+    # No credentials needed: the track list is public data on Spotify's
+    # embed page. The Spotify API (needs credentials) is only a fallback
+    # for private links the embed page can't read.
+    tracks = fetch_spotify_tracks_embed(kind, item_id)
+    if tracks is None:
+        sp = spotify_client()
+        if sp is None:
+            api.send_text(user_chat_id, SPOTIFY_UNREADABLE)
+            return
+        try:
+            tracks = fetch_spotify_tracks(sp, kind, item_id)
+        except Exception as exc:
+            log(f"Spotify fetch failed: {exc}")
+            api.send_text(
+                user_chat_id, f"Sorry, I couldn't read that Spotify {kind}: {exc}"
+            )
+            return
     if not tracks:
         api.send_text(
             user_chat_id, "That Spotify link has no tracks I can use."
@@ -660,8 +752,12 @@ def handle_message(
         return  # ignore non-link text
     kind, detail = classify_link(url)
     if kind == "youtube":
+        # Immediate ack so the user knows it's being worked on, then the
+        # (slow) download starts.
+        api.send_text(chat_id, YOUTUBE_ON_THE_WAY)
         handle_youtube(api, url, chat_id, channel_id)
     elif kind == "spotify":
+        api.send_text(chat_id, SPOTIFY_ON_THE_WAY)
         handle_spotify(api, detail, chat_id, channel_id)
     else:
         api.send_text(chat_id, CANT_REPLY)

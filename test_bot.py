@@ -21,12 +21,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bot
 from bot import (
     CANT_REPLY,
+    SPOTIFY_UNREADABLE,
     START_TEXT,
     SeenStore,
     _ydl_opts,
     classify_link,
     extract_url,
     fast_forward_seen,
+    fetch_spotify_tracks_embed,
+    handle_spotify,
+    parse_spotify_embed_tracks,
     resolve_youtube_cookiefile,
     start_health_server,
     youtube_failure_message,
@@ -364,6 +368,213 @@ class TestAltFallback(unittest.TestCase):
         self.assertEqual(_AUDIO_MIME_BY_SUFFIX[".mp3"], "audio/mpeg")
         self.assertEqual(_AUDIO_MIME_BY_SUFFIX[".m4a"], "audio/mp4")
         self.assertEqual(_AUDIO_MIME_BY_SUFFIX[".webm"], "audio/webm")
+
+
+class TestSpotifyEmbed(unittest.TestCase):
+    PLAYLIST_HTML = (
+        '<html><head><title>Today\'s Top Hits | Spotify</title></head><body>'
+        '<script>{"trackList":[{"uri":"spotify:track:aaa","title":"Song One",'
+        '"subtitle":"Artist A, Artist B","duration":180000},'
+        '{"uri":"spotify:track:bbb","title":"Song Two","subtitle":"Artist C",'
+        '"duration":200000}]}</script></body></html>'
+    )
+    TRACK_HTML = (
+        "<html><head><title>Song One - Artist A, Artist B | Spotify</title>"
+        "</head><body></body></html>"
+    )
+
+    def test_playlist_embed_parses_tracklist(self):
+        tracks = parse_spotify_embed_tracks(self.PLAYLIST_HTML)
+        self.assertEqual(
+            tracks,
+            [
+                {"name": "Song One", "artists": "Artist A, Artist B"},
+                {"name": "Song Two", "artists": "Artist C"},
+            ],
+        )
+
+    def test_track_embed_parses_title_tag(self):
+        tracks = parse_spotify_embed_tracks(self.TRACK_HTML)
+        self.assertEqual(
+            tracks, [{"name": "Song One", "artists": "Artist A, Artist B"}]
+        )
+
+    def test_track_embed_title_only(self):
+        html = "<html><head><title>Song One | Spotify</title></head></html>"
+        self.assertEqual(
+            parse_spotify_embed_tracks(html),
+            [{"name": "Song One", "artists": ""}],
+        )
+
+    def test_no_track_data_returns_empty(self):
+        self.assertEqual(parse_spotify_embed_tracks("<html></html>"), [])
+        # Unbalanced trackList falls through to title parsing, then [].
+        self.assertEqual(
+            parse_spotify_embed_tracks('{"trackList":[{"title":"x"'),
+            [],
+        )
+
+    def test_fetch_embed_uses_embed_url(self):
+        class FakeResp:
+            status_code = 200
+            text = TestSpotifyEmbed.PLAYLIST_HTML
+
+            def raise_for_status(self):
+                pass
+
+        with mock.patch.object(bot.requests, "get", return_value=FakeResp()) as get:
+            tracks = fetch_spotify_tracks_embed("playlist", "37abc")
+        get.assert_called_once()
+        self.assertEqual(
+            get.call_args.args[0],
+            "https://open.spotify.com/embed/playlist/37abc",
+        )
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(tracks[0]["name"], "Song One")
+
+    def test_fetch_embed_failure_returns_none(self):
+        with mock.patch.object(
+            bot.requests, "get", side_effect=RuntimeError("down")
+        ):
+            self.assertIsNone(fetch_spotify_tracks_embed("playlist", "37abc"))
+
+
+class TestHandleSpotifyEmbedFirst(unittest.TestCase):
+    class FakeApi:
+        def __init__(self):
+            self.texts = []
+
+        def send_text(self, chat_id, text):
+            self.texts.append(text)
+
+    def _run(self, embed_tracks, spotify_client, api_tracks):
+        api = self.FakeApi()
+        fake_file = {
+            "path": Path(tempfile.gettempdir()) / "fake.mp3",
+            "title": "Song One",
+            "performer": "Artist A",
+        }
+        with (
+            mock.patch.object(
+                bot, "fetch_spotify_tracks_embed", return_value=embed_tracks
+            ),
+            mock.patch.object(bot, "spotify_client", return_value=spotify_client),
+            mock.patch.object(
+                bot, "fetch_spotify_tracks", return_value=api_tracks
+            ),
+            mock.patch.object(
+                bot,
+                "youtube_search_first",
+                return_value={"webpage_url": "https://youtube.com/watch?v=x"},
+            ),
+            mock.patch.object(
+                bot, "download_video_as_mp3", return_value=dict(fake_file)
+            ),
+            mock.patch.object(bot, "post_files_to_channel", return_value=1),
+        ):
+            handle_spotify(api, ("playlist", "37abc"), 123, "-1001")
+        return api
+
+    def test_embed_first_no_credentials_needed(self):
+        api = self._run(
+            embed_tracks=[{"name": "Song One", "artists": "Artist A"}],
+            spotify_client=None,
+            api_tracks=[],
+        )
+        self.assertTrue(any("Done" in t for t in api.texts))
+        self.assertNotIn(SPOTIFY_UNREADABLE, api.texts)
+
+    def test_embed_fails_falls_back_to_api(self):
+        fake_sp = object()
+        api = self._run(
+            embed_tracks=None,
+            spotify_client=fake_sp,
+            api_tracks=[{"name": "Song One", "artists": "Artist A"}],
+        )
+        self.assertTrue(any("Done" in t for t in api.texts))
+
+    def test_both_fail_replies_unreadable(self):
+        api = self._run(
+            embed_tracks=None, spotify_client=None, api_tracks=[]
+        )
+        self.assertIn(SPOTIFY_UNREADABLE, api.texts)
+
+
+class TestHandleMessageAck(unittest.TestCase):
+    """The bot acks a link immediately, before the slow work starts."""
+
+    class FakeApi:
+        def __init__(self):
+            self.events = []
+
+        def send_text(self, chat_id, text):
+            self.events.append(("text", text))
+
+    def _msg(self, text):
+        return {"text": text, "chat": {"id": 123}, "from": {"is_bot": False}}
+
+    def test_youtube_ack_first_then_handler(self):
+        from bot import handle_message
+
+        api = self.FakeApi()
+        with mock.patch.object(
+            bot,
+            "handle_youtube",
+            side_effect=lambda *a: api.events.append(("handler", "youtube")),
+        ):
+            handle_message(
+                api,
+                self._msg("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+                "-1001",
+            )
+        self.assertEqual(
+            api.events,
+            [("text", "Your YouTube is on the way"), ("handler", "youtube")],
+        )
+
+    def test_spotify_ack_first_then_handler(self):
+        from bot import handle_message
+
+        api = self.FakeApi()
+        with mock.patch.object(
+            bot,
+            "handle_spotify",
+            side_effect=lambda *a: api.events.append(("handler", "spotify")),
+        ):
+            handle_message(
+                api,
+                self._msg(
+                    "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+                ),
+                "-1001",
+            )
+        self.assertEqual(
+            api.events,
+            [("text", "Your Spotify is on the way"), ("handler", "spotify")],
+        )
+
+    def test_other_link_gets_no_ack(self):
+        from bot import handle_message
+
+        api = self.FakeApi()
+        handle_message(api, self._msg("https://example.com/song.mp3"), "-1001")
+        self.assertEqual(
+            api.events,
+            [
+                (
+                    "text",
+                    "Sorry, I can't do this link — I only handle YouTube links "
+                    "and Spotify playlists.",
+                )
+            ],
+        )
+
+    def test_plain_text_gets_nothing(self):
+        from bot import handle_message
+
+        api = self.FakeApi()
+        handle_message(api, self._msg("hello there"), "-1001")
+        self.assertEqual(api.events, [])
 
 
 class TestReplyTexts(unittest.TestCase):
